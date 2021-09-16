@@ -18,6 +18,7 @@ import (
 	"errors"
 	"math/rand"
 
+	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
@@ -193,7 +194,27 @@ func (r *Raft) resetRandomElectionTimeout() {
 // current commit index to the given peer. Returns true if a message was sent.
 func (r *Raft) sendAppend(to uint64) bool {
 	// Your Code Here (2A).
-	return false
+	nextIndex := r.Prs[to].Next
+	prevLogIndex := nextIndex - 1
+	prevLogTerm, _ := r.RaftLog.storage.Term(prevLogIndex)
+	entries, err := r.RaftLog.Slice(nextIndex, r.RaftLog.LastIndex()+1)
+	if err != nil {
+		log.Error(err.Error())
+		return false
+	}
+
+	msg := pb.Message{
+		MsgType: pb.MessageType_MsgAppend,
+		From:    r.id,
+		To:      to,
+		Term:    r.Term,
+		LogTerm: prevLogTerm,
+		Index:   prevLogIndex,
+		Entries: entries,
+		Commit:  r.RaftLog.committed,
+	}
+	r.msgs = append(r.msgs, msg)
+	return true
 }
 
 // sendHeartbeat sends a heartbeat RPC to the given peer.
@@ -305,7 +326,15 @@ func (r *Raft) becomeLeader() {
 	r.State = StateLeader
 	r.Lead = r.id
 	r.heartbeatElapsed = 0
-	// TODO: send entries
+	lastIndex := r.RaftLog.LastIndex()
+	r.Prs[r.id].Next = lastIndex + 1
+	r.Prs[r.id].Match = lastIndex + 1
+	for peer := range r.Prs {
+		if peer == r.id {
+			continue
+		}
+		r.Prs[peer].Next = lastIndex + 1
+	}
 }
 
 // Step the entrance of handle message, see `MessageType`
