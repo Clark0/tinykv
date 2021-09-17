@@ -16,6 +16,7 @@ package raft
 
 import (
 	"errors"
+	"fmt"
 	"log"
 
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
@@ -116,13 +117,15 @@ func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 }
 
 func (l *RaftLog) Slice(loIndex uint64, hiIndex uint64) ([]*pb.Entry, error) {
-	if loIndex < l.offset || loIndex >= hiIndex || hiIndex > l.offset + uint64(len(l.entries)) {
-		return nil, errors.New("invalid index range")
+	if loIndex < l.offset || loIndex > hiIndex || hiIndex > l.offset+uint64(len(l.entries)) {
+		return nil, errors.New(fmt.Sprintf("invalid index range from %d to %d", loIndex, hiIndex))
 	}
-
-	lo, hi := loIndex - l.offset, hiIndex - l.offset
-	var ent = make([]*pb.Entry, hi - lo)
-	for i, v := range l.entries[lo: hi] {
+	if loIndex == hiIndex {
+		return nil, nil
+	}
+	lo, hi := loIndex-l.offset, hiIndex-l.offset
+	var ent = make([]*pb.Entry, hi-lo)
+	for i, v := range l.entries[lo:hi] {
 		ent[i] = &v
 	}
 	return ent, nil
@@ -134,14 +137,17 @@ func (l *RaftLog) LastIndex() uint64 {
 	if size := len(l.entries); size != 0 {
 		return l.offset + uint64(size) - 1
 	}
-	lastIndex, _ := l.storage.LastIndex()
+	lastIndex, err := l.storage.LastIndex()
+	if err != nil {
+		panic(err)
+	}
 	return lastIndex
 }
 
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	// Your Code Here (2A).
-	if len(l.entries) > 0 && i >= l.offset {
+	if len(l.entries) > 0 && i >= l.offset && i <= l.LastIndex() {
 		return l.entries[i-l.offset].Term, nil
 	}
 	term, err := l.storage.Term(i)
