@@ -16,6 +16,7 @@ package raft
 
 import (
 	"errors"
+	"fmt"
 	"math/rand"
 
 	"github.com/pingcap-incubator/tinykv/log"
@@ -188,6 +189,21 @@ func (r *Raft) resetRandomElectionTimeout() {
 	r.randomElectionTimeout = r.electionTimeout + rand.Intn(r.electionTimeout)
 }
 
+func (r *Raft) appendEntries(m pb.Message) {
+	for _, entry := range m.Entries {
+		entry.Term = r.Term
+		entry.Index = r.Prs[r.id].Next
+		r.RaftLog.entries = append(r.RaftLog.entries, *entry)
+		r.Prs[r.id].Match = entry.Index
+		r.Prs[r.id].Next++
+	}
+
+	r.sendAppends()
+	if len(r.Prs) == 1 {
+		r.RaftLog.committed = r.Prs[r.id].Match
+	}
+}
+
 // sendAppend sends an append RPC with new entries (if any) and the
 // current commit index to the given peer. Returns true if a message was sent.
 func (r *Raft) sendAppend(to uint64) bool {
@@ -199,7 +215,7 @@ func (r *Raft) sendAppend(to uint64) bool {
 		log.Error(err)
 		return false
 	}
-	entries, err := r.RaftLog.Slice(nextIndex, r.RaftLog.LastIndex()+1)
+	entries, err := r.RaftLog.Slice(nextIndex, r.Prs[r.id].Next)
 	if err != nil {
 		log.Error(err)
 		return false
@@ -348,12 +364,8 @@ func (r *Raft) becomeLeader() {
 	r.State = StateLeader
 	r.Lead = r.id
 	r.heartbeatElapsed = 0
-	lastIndex := r.RaftLog.LastIndex()
 	for peer := range r.Prs {
-		if peer == r.id {
-			continue
-		}
-		r.Prs[peer].Next = lastIndex + 1
+		r.Prs[peer].Next = r.RaftLog.LastIndex() + 1
 		r.Prs[peer].Match = 0
 	}
 
@@ -366,7 +378,6 @@ func (r *Raft) becomeLeader() {
 	r.RaftLog.entries = append(r.RaftLog.entries, noopEntry)
 	r.Prs[r.id].Match = r.RaftLog.LastIndex()
 	r.Prs[r.id].Next = r.RaftLog.LastIndex() + 1
-	r.sendAppends()
 }
 
 // Step the entrance of handle message, see `MessageType`
@@ -441,6 +452,7 @@ func (r *Raft) stepLeader(m pb.Message) error {
 	case pb.MessageType_MsgBeat:
 		r.sendHeartBeats()
 	case pb.MessageType_MsgPropose:
+		r.appendEntries(m)
 	case pb.MessageType_MsgAppend:
 	case pb.MessageType_MsgAppendResponse:
 		r.handleAppendEntriesResponse(m)
@@ -533,31 +545,43 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 
 	// whether log contains an entry at PrevLogIndex
 	// whose term matches PrevLogTerm
+	if m.Index > r.RaftLog.LastIndex() {
+		r.sendAppendResponse(m.From, true)
+		return
+	}
+
 	logTerm, err := r.RaftLog.Term(m.Index)
 	if err != nil {
-		log.Error(err)
+		log.Fatal(err)
 		return
 	}
 	if logTerm != m.LogTerm {
 		r.sendAppendResponse(m.From, true)
 		return
 	}
-	logEntryIndex := m.Index + 1 - r.RaftLog.offset
-	leaderEntryIndex := 0
-	for ; leaderEntryIndex < len(m.Entries); leaderEntryIndex++ {
-		if logEntryIndex >= uint64(len(r.RaftLog.entries)) {
-			break
-		}
 
-		if r.RaftLog.entries[leaderEntryIndex].Term != m.Entries[leaderEntryIndex].Term {
+	i := 0
+	for ;  i < len(m.Entries); i++ {
+		leaderIndex, leaderTerm := m.Entries[i].Index, m.Entries[i].Term
+		if leaderIndex > r.RaftLog.LastIndex() {
 			break
 		}
-		logEntryIndex++
+		logTerm, err := r.RaftLog.Term(leaderIndex)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if logTerm != leaderTerm {
+			j := leaderIndex - r.RaftLog.offset
+			r.RaftLog.entries = r.RaftLog.entries[:j]
+			// stable just before the new index
+			r.RaftLog.stabled = min(r.RaftLog.stabled, leaderIndex - 1)
+			break
+		}
 	}
-	r.RaftLog.entries = r.RaftLog.entries[:logEntryIndex]
-	for ; leaderEntryIndex < len(m.Entries); leaderEntryIndex++ {
-		r.RaftLog.entries = append(r.RaftLog.entries, *m.Entries[leaderEntryIndex])
+	for ; i < len(m.Entries); i++ {
+		r.RaftLog.entries = append(r.RaftLog.entries, *m.Entries[i])
 	}
+
 	if m.Commit > r.RaftLog.committed {
 		r.RaftLog.committed = min(m.Commit, r.RaftLog.LastIndex())
 	}
@@ -568,12 +592,36 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 	peer := m.From
 	if m.Reject {
 		r.Prs[peer].Next--
+		log.Error(fmt.Sprintf( "Decrease next index for %d to %d", peer, r.Prs[peer].Next))
 		r.sendAppend(peer)
 		return
 	}
 
 	r.Prs[peer].Next = r.Prs[r.id].Next
 	r.Prs[m.From].Match = r.Prs[r.id].Match
+
+	// If there exists an N such that N > commitIndex, a majority
+	// of matchIndex[i] ≥ N, and log[N].term == currentTerm:
+	// set commitIndex = N
+	prevCommitIndex := r.RaftLog.committed
+	for i := r.RaftLog.committed + 1; i <= r.RaftLog.LastIndex(); i++ {
+		if term, _ := r.RaftLog.Term(i); term == r.Term {
+			matchCount := 0
+			for _, prs := range r.Prs {
+				if prs.Match >= i {
+					matchCount++
+				}
+			}
+			if matchCount > len(r.Prs)/2 {
+				r.RaftLog.committed = i
+			}
+			// TODO: Optimize
+		}
+	}
+
+	if prevCommitIndex < r.RaftLog.committed {
+		r.sendAppends()
+	}
 }
 
 // handleHeartbeat handle Heartbeat RPC request

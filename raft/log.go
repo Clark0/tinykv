@@ -56,7 +56,7 @@ type RaftLog struct {
 	pendingSnapshot *pb.Snapshot
 
 	// Your Data Here (2A).
-	// LogIndex of entries[0]
+	// logIndex to slice index
 	offset uint64
 }
 
@@ -79,7 +79,7 @@ func newLog(storage Storage) *RaftLog {
 	if err != nil {
 		panic(err)
 	}
-	log := &RaftLog{
+	return &RaftLog{
 		storage:   storage,
 		entries:   entries,
 		stabled:   lastIndex,
@@ -87,7 +87,6 @@ func newLog(storage Storage) *RaftLog {
 		applied:   firstIndex - 1,
 		offset:    firstIndex,
 	}
-	return log
 }
 
 // We need to compact the log entries in some point of time like
@@ -101,9 +100,9 @@ func (l *RaftLog) maybeCompact() {
 func (l *RaftLog) unstableEntries() []pb.Entry {
 	// Your Code Here (2A).
 	if len(l.entries) > 0 {
-		return nil
+		return l.entries[l.stabled+1-l.offset:]
 	}
-	return l.entries[l.stabled+1-l.offset:]
+	return nil
 }
 
 // nextEnts returns all the committed but not applied entries
@@ -118,7 +117,8 @@ func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 
 func (l *RaftLog) Slice(loIndex uint64, hiIndex uint64) ([]*pb.Entry, error) {
 	if loIndex < l.offset || loIndex > hiIndex || hiIndex > l.offset+uint64(len(l.entries)) {
-		return nil, errors.New(fmt.Sprintf("invalid index range from %d to %d", loIndex, hiIndex))
+		return nil, errors.New(fmt.Sprintf("invalid index range from %d to %d, allowed range %d to %d",
+			loIndex, hiIndex, l.offset, l.offset+uint64(len(l.entries))))
 	}
 	if loIndex == hiIndex {
 		return nil, nil
