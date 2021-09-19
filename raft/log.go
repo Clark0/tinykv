@@ -77,11 +77,15 @@ func newLog(storage Storage) *RaftLog {
 	if err != nil {
 		panic(err)
 	}
+	hardState, _, err := storage.InitialState()
+	if err != nil {
+		panic(err)
+	}
 	return &RaftLog{
 		storage:   storage,
 		entries:   entries,
 		stabled:   lastIndex,
-		committed: firstIndex - 1,
+		committed: hardState.Commit,
 		applied:   firstIndex - 1,
 		offset:    firstIndex,
 	}

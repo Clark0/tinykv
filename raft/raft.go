@@ -18,7 +18,6 @@ import (
 	"errors"
 	"math/rand"
 
-	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
@@ -191,19 +190,38 @@ func newRaft(c *Config) *Raft {
 	}
 	lastLogIndex := raft.RaftLog.LastIndex()
 	for _, id := range c.peers {
+		match := uint64(0)
+		if id == raft.id {
+			match = lastLogIndex
+		}
+
 		raft.Prs[id] = &Progress{
-			Match: 0,
+			Match: match,
 			Next:  lastLogIndex + 1,
 		}
 	}
-	raft.Prs[raft.id].Match = lastLogIndex
-	raft.RaftLog.applied = c.Applied
+	// raft.RaftLog.applied = c.Applied
 	raft.resetTick()
 	return raft
 }
 
 func (r *Raft) resetRandomElectionTimeout() {
 	r.randomElectionTimeout = r.electionTimeout + rand.Intn(r.electionTimeout)
+}
+
+func (r *Raft) softState() *SoftState {
+	return &SoftState{
+		Lead:      r.Lead,
+		RaftState: r.State,
+	}
+}
+
+func (r *Raft) hardState() pb.HardState {
+	return pb.HardState{
+		Term:   r.Term,
+		Vote:   r.Vote,
+		Commit: r.RaftLog.committed,
+	}
 }
 
 func (r *Raft) appendEntries(ents []*pb.Entry) {
@@ -228,7 +246,7 @@ func (r *Raft) sendAppend(to uint64) bool {
 	prevLogIndex := nextIndex - 1
 	prevLogTerm, err := r.RaftLog.Term(prevLogIndex)
 	if err != nil {
-		log.Error(err)
+		// log.Error(err)
 		return false
 	}
 	entries := r.RaftLog.Slice(nextIndex, r.RaftLog.LastIndex()+1)
@@ -574,7 +592,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	logTerm, err := r.RaftLog.Term(m.Index)
 	if err != nil {
 		r.sendAppendResponse(m.From, true)
-		log.Error(err)
+		// log.Error(err)
 		return
 	}
 	if logTerm != m.LogTerm {
