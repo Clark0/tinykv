@@ -168,19 +168,37 @@ func newRaft(c *Config) *Raft {
 		panic(err.Error())
 	}
 	// Your Code Here (2A).
+	hardState, confState, err := c.Storage.InitialState()
+	if err != nil {
+		panic(err)
+	}
 	raft := &Raft{
 		id:               c.ID,
+		Term:             hardState.Term,
+		Vote:             hardState.Vote,
 		RaftLog:          newLog(c.Storage),
 		Prs:              make(map[uint64]*Progress),
+		State:            StateFollower,
 		votes:            make(map[uint64]bool),
+		Lead:             None,
 		heartbeatTimeout: c.HeartbeatTick,
 		electionTimeout:  c.ElectionTick,
+		leadTransferee:   0,
+		PendingConfIndex: 0,
 	}
-	for _, p := range c.peers {
-		raft.Prs[p] = &Progress{}
+	if c.peers == nil {
+		c.peers = confState.Nodes
 	}
-	raft.resetRandomElectionTimeout()
-	raft.becomeFollower(0, None)
+	lastLogIndex := raft.RaftLog.LastIndex()
+	for _, id := range c.peers {
+		raft.Prs[id] = &Progress{
+			Match: 0,
+			Next:  lastLogIndex + 1,
+		}
+	}
+	raft.Prs[raft.id].Match = lastLogIndex
+	raft.RaftLog.applied = c.Applied
+	raft.resetTick()
 	return raft
 }
 
@@ -518,6 +536,10 @@ func (r *Raft) handleRequestVote(m pb.Message) {
 
 func (r *Raft) handleRequestVoteResponse(m pb.Message) {
 	if m.Term < r.Term {
+		return
+	}
+	if m.Term > r.Term {
+		r.becomeFollower(m.Term, None)
 		return
 	}
 	r.votes[m.From] = !m.Reject
