@@ -15,8 +15,6 @@
 package raft
 
 import (
-	"errors"
-	"fmt"
 	"log"
 
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
@@ -115,20 +113,31 @@ func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 	return nil
 }
 
-func (l *RaftLog) Slice(loIndex uint64, hiIndex uint64) ([]*pb.Entry, error) {
-	if loIndex < l.offset || loIndex > hiIndex || hiIndex > l.offset+uint64(len(l.entries)) {
-		return nil, errors.New(fmt.Sprintf("invalid index range from %d to %d, allowed range %d to %d",
-			loIndex, hiIndex, l.offset, l.offset+uint64(len(l.entries))))
-	}
-	if loIndex == hiIndex {
-		return nil, nil
-	}
+func (l *RaftLog) Slice(loIndex uint64, hiIndex uint64) []*pb.Entry {
 	lo, hi := loIndex-l.offset, hiIndex-l.offset
-	var ent = make([]*pb.Entry, hi-lo)
-	for i, v := range l.entries[lo:hi] {
-		ent[i] = &v
+	if lo >= 0 && hi <= uint64(len(l.entries)) {
+		ent := make([]*pb.Entry, hi - lo)
+		for i := lo; i < hi; i++ {
+			ent[i-lo] = &l.entries[i]
+		}
+		return ent
 	}
-	return ent, nil
+	return nil
+}
+
+// Truncate entries since loIndex
+func (l *RaftLog) TruncateEntriesFrom(loIndex uint64) {
+	l.stabled = min(l.stabled, loIndex-1)
+	lo := loIndex - l.offset
+	if lo >= 0 && lo < uint64(len(l.entries)) {
+		l.entries = l.entries[:lo]
+	}
+}
+
+func (l *RaftLog) appendEntries(ents []*pb.Entry) {
+	for _, ent := range ents {
+		l.entries = append(l.entries, *ent)
+	}
 }
 
 // LastIndex return the last index of the log entries
@@ -147,7 +156,10 @@ func (l *RaftLog) LastIndex() uint64 {
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	// Your Code Here (2A).
-	if len(l.entries) > 0 && i >= l.offset && i <= l.LastIndex() {
+	if i > l.LastIndex() {
+		return 0, ErrUnavailable
+	}
+	if len(l.entries) > 0 && i >= l.offset {
 		return l.entries[i-l.offset].Term, nil
 	}
 	term, err := l.storage.Term(i)
