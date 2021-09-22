@@ -227,7 +227,7 @@ func (r *Raft) hardState() pb.HardState {
 func (r *Raft) appendEntries(ents []*pb.Entry) {
 	for _, entry := range ents {
 		entry.Term = r.Term
-		entry.Index = r.Prs[r.id].Next
+		entry.Index = r.RaftLog.LastIndex() + 1
 		r.RaftLog.entries = append(r.RaftLog.entries, *entry)
 	}
 	r.Prs[r.id].Match = r.RaftLog.LastIndex()
@@ -669,6 +669,7 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 	// Your Code Here (2A).
 	if m.Term < r.Term {
 		r.sendHeartBeatResponse(m.From, true)
+		return
 	}
 	r.becomeFollower(m.Term, m.From)
 	r.resetTick()
