@@ -85,7 +85,7 @@ func newLog(storage Storage) *RaftLog {
 		storage:   storage,
 		entries:   entries,
 		stabled:   lastIndex,
-		committed: hardState.Commit,
+		committed: hardState.GetCommit(),
 		applied:   firstIndex - 1,
 		offset:    firstIndex,
 	}
@@ -120,7 +120,7 @@ func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 func (l *RaftLog) Slice(loIndex uint64, hiIndex uint64) []*pb.Entry {
 	lo, hi := loIndex-l.offset, hiIndex-l.offset
 	if lo >= 0 && hi <= uint64(len(l.entries)) {
-		ent := make([]*pb.Entry, hi - lo)
+		ent := make([]*pb.Entry, hi-lo)
 		for i := lo; i < hi; i++ {
 			ent[i-lo] = &l.entries[i]
 		}
@@ -133,9 +133,7 @@ func (l *RaftLog) Slice(loIndex uint64, hiIndex uint64) []*pb.Entry {
 func (l *RaftLog) TruncateEntriesFrom(loIndex uint64) {
 	l.stabled = min(l.stabled, loIndex-1)
 	lo := loIndex - l.offset
-	if lo >= 0 && lo < uint64(len(l.entries)) {
-		l.entries = l.entries[:lo]
-	}
+	l.entries = l.entries[:lo]
 }
 
 func (l *RaftLog) appendEntries(ents []*pb.Entry) {

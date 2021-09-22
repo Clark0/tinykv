@@ -8,6 +8,8 @@ import (
 	"github.com/Connor1996/badger"
 	"github.com/Connor1996/badger/y"
 	"github.com/golang/protobuf/proto"
+	"github.com/pingcap/errors"
+
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/meta"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/runner"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/snap"
@@ -19,7 +21,6 @@ import (
 	"github.com/pingcap-incubator/tinykv/proto/pkg/metapb"
 	rspb "github.com/pingcap-incubator/tinykv/proto/pkg/raft_serverpb"
 	"github.com/pingcap-incubator/tinykv/raft"
-	"github.com/pingcap/errors"
 )
 
 type ApplySnapResult struct {
@@ -308,6 +309,30 @@ func ClearMeta(engines *engine_util.Engines, kvWB, raftWB *engine_util.WriteBatc
 // never be committed
 func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.WriteBatch) error {
 	// Your Code Here (2B).
+	if len(entries) <= 0 {
+		return nil
+	}
+
+	entFirstIdx, entLastIdx := entries[0].Index, entries[len(entries)-1].Index
+	psFirstIdx, _ := ps.FirstIndex()
+	psLastIdx, _ := ps.LastIndex()
+	if entLastIdx < psFirstIdx {
+		return nil
+	}
+	if entFirstIdx < psFirstIdx {
+		entries = entries[psFirstIdx-entFirstIdx:]
+	}
+	// delete log entries that will never be committed
+	for i := entLastIdx + 1; i <= psLastIdx; i++ {
+		raftWB.DeleteMeta(meta.RaftLogKey(ps.region.GetId(), i))
+	}
+	// append entries to raft log
+	for _, ent := range entries {
+		raftWB.SetMeta(meta.RaftLogKey(ps.region.GetId(), ent.Index), &ent)
+	}
+	// update ps raftState
+	ps.raftState.LastIndex = entLastIdx
+	ps.raftState.LastTerm = entries[len(entries)-1].Term
 	return nil
 }
 
@@ -331,7 +356,17 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, error) {
 	// Hint: you may call `Append()` and `ApplySnapshot()` in this function
 	// Your Code Here (2B/2C).
-	return nil, nil
+	raftWB := new(engine_util.WriteBatch)
+	result := new(ApplySnapResult)
+	// store append log entries
+	ps.Append(ready.Entries, raftWB)
+	// store RaftLocalState
+	if !raft.IsEmptyHardState(ready.HardState) {
+		ps.raftState.HardState = &ready.HardState
+	}
+	raftWB.SetMeta(meta.RaftStateKey(ps.region.GetId()), ps.raftState)
+	raftWB.WriteToDB(ps.Engines.Raft)
+	return result, nil
 }
 
 func (ps *PeerStorage) ClearData() {

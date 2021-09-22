@@ -200,7 +200,7 @@ func newRaft(c *Config) *Raft {
 			Next:  lastLogIndex + 1,
 		}
 	}
-	// raft.RaftLog.applied = c.Applied
+	raft.RaftLog.applied = c.Applied
 	raft.resetTick()
 	return raft
 }
