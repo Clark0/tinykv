@@ -18,6 +18,7 @@ import (
 	"errors"
 	"math/rand"
 
+	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
@@ -200,7 +201,10 @@ func newRaft(c *Config) *Raft {
 			Next:  lastLogIndex + 1,
 		}
 	}
-	raft.RaftLog.applied = c.Applied
+	raft.RaftLog.committed = hardState.Commit
+	if c.Applied > 0 {
+		raft.RaftLog.applied = c.Applied
+	}
 	raft.resetTick()
 	return raft
 }
@@ -246,8 +250,12 @@ func (r *Raft) sendAppend(to uint64) bool {
 	prevLogIndex := nextIndex - 1
 	prevLogTerm, err := r.RaftLog.Term(prevLogIndex)
 	if err != nil {
-		// log.Error(err)
-		return false
+		if err == ErrCompacted {
+			// follower lag behind, leader has discarded the entry
+			r.sendSnapshot(to)
+			return false
+		}
+		panic(err)
 	}
 	entries := r.RaftLog.Slice(nextIndex, r.RaftLog.LastIndex()+1)
 	msg := pb.Message{
@@ -349,6 +357,23 @@ func (r *Raft) sendRequestVoteResponse(to uint64, reject bool) {
 		Reject:  reject,
 	}
 	r.msgs = append(r.msgs, msg)
+}
+
+func (r *Raft) sendSnapshot(to uint64) {
+	snapshot, err := r.RaftLog.storage.Snapshot()
+	if err != nil {
+		log.Error(err)
+		return
+	}
+	msg := pb.Message{
+		MsgType: pb.MessageType_MsgSnapshot,
+		From: r.id,
+		To: to,
+		Term: r.Term,
+		Snapshot: &snapshot,
+	}
+	r.msgs = append(r.msgs, msg)
+	r.Prs[to].Next = snapshot.Metadata.Index
 }
 
 // tick advances the internal logical clock by a single tick.
@@ -679,6 +704,29 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 // handleSnapshot handle Snapshot RPC request
 func (r *Raft) handleSnapshot(m pb.Message) {
 	// Your Code Here (2C).
+	if m.Term < r.Term {
+		r.sendAppendResponse(m.From, true)
+		return
+	}
+	sIndex := m.Snapshot.Metadata.Index
+	if sIndex <= r.RaftLog.committed {
+		r.sendAppendResponse(m.From, false)
+		return
+	}
+	r.becomeFollower(m.Term, m.From)
+	r.RaftLog.entries = nil
+	r.RaftLog.offset = sIndex + 1
+	r.RaftLog.committed = sIndex
+	r.RaftLog.applied = sIndex
+	r.RaftLog.stabled = sIndex
+	r.RaftLog.pendingSnapshot = m.Snapshot
+
+	r.Prs = make(map[uint64]*Progress)
+	for _, p := range m.Snapshot.Metadata.ConfState.Nodes {
+		r.Prs[p] = &Progress{}
+	}
+
+	r.sendAppendResponse(m.From, false)
 }
 
 // addNode add a new node to raft group
